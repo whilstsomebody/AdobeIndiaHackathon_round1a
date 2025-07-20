@@ -1,10 +1,10 @@
-FROM --platform=linux/amd64 python:3.9-slim
+FROM --platform=linux/amd64 python:3.9-slim-buster
 
 WORKDIR /app
 
-COPY . /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN apt-get update && apt-get install -y build-essential \
- && pip install --no-cache-dir -r requirements.txt
+COPY . .
 
 CMD ["python", "main.py"]
