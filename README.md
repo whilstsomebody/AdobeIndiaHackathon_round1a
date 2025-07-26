@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 # Adobe India Hackathon - Connecting the Dots (Round 1A)
 
 ## Challenge Theme: Understand Your Document
@@ -75,6 +74,3 @@ The solution is designed to run within a Docker container, ensuring a consistent
 
 5.  **Check the Output:**
     After the `docker run` command completes, the generated JSON outline files (e.g., `filename.json` for each `filename.pdf`) will be available in the local `output/` directory.
-=======
-PDF Extractor
->>>>>>> Stashed changes

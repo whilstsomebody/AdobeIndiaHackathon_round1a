@@ -1,6 +1,4 @@
-# utils/pdf_parser.py
-
-import fitz # PyMuPDF
+import fitz
 import re
 
 def extract_text_blocks_with_details(pdf_path):
@@ -9,26 +7,20 @@ def extract_text_blocks_with_details(pdf_path):
     Focuses on reliable line extraction and initial span merging.
     """
     doc = fitz.open(pdf_path)
-    all_extracted_lines = [] # Renamed to emphasize we're getting lines/span groups
+    all_extracted_lines = []
 
     for page_num, page in enumerate(doc):
         page_dict = page.get_text("dict")
-        
-        # Sort raw blocks by Y-coordinate
         sorted_raw_blocks = sorted(page_dict["blocks"], key=lambda b: b["bbox"][1])
 
         for b_raw in sorted_raw_blocks:
-            if b_raw['type'] == 0: # text block
-                
-                # Sort raw lines within a block by Y-coordinate
+            if b_raw['type'] == 0:
                 for l_raw in sorted(b_raw["lines"], key=lambda l: l["bbox"][1]):
                     merged_spans = []
-                    # Sort raw spans within a line by X-coordinate
                     for s_raw in sorted(l_raw["spans"], key=lambda s: s["bbox"][0]):
                         span_text = s_raw["text"]
                         if not span_text.strip(): continue
 
-                        # Aggressive horizontal merging of spans that are very close horizontally and similar style
                         if merged_spans and \
                            s_raw['bbox'][0] - merged_spans[-1]['bbox'][2] < 3 and \
                            abs(s_raw['size'] - merged_spans[-1]['size']) < 0.1 and \
@@ -43,13 +35,11 @@ def extract_text_blocks_with_details(pdf_path):
                                 "text": span_text,
                                 "font": s_raw["font"],
                                 "size": s_raw["size"],
-                                "bbox": list(s_raw["bbox"]), # Store as mutable list
+                                "bbox": list(s_raw["bbox"]),
                             })
                     
                     if merged_spans:
-                        # Reconstruct text for the entire logical line
                         line_text = "".join([s['text'] for s in merged_spans]).strip()
-                        # Apply initial normalization to remove obvious PDF artifacts like repeated characters
                         line_text = re.sub(r'(.)\1{3,}', r'\1', line_text)
                         line_text = re.sub(r'\s+', ' ', line_text).strip()
                         

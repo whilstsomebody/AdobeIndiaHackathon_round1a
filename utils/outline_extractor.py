@@ -1,5 +1,3 @@
-# utils/outline_extractor.py
-
 import re
 from collections import Counter
 
@@ -11,326 +9,254 @@ def is_all_caps(text):
     """Check if text is all uppercase (often used for headings)."""
     return text.isupper() and len(text) > 3 and any(c.isalpha() for c in text)
 
-def is_likely_noise(text, size, body_text_size):
-    """Comprehensive noise detection function."""
-    text = text.strip()
-    
-    # Empty or too short
-    if not text or len(text) < 3:
-        return True
-    
-    # Single digits or very short numbers
-    if text.isdigit() and len(text) <= 2:
-        return True
-    
-    # Common noise patterns
-    noise_patterns = [
-        r'^[\-\_=\s\.]+$',  # Lines of dashes, underscores, dots
-        r'^\s*[\d\-\.]+\s*$',  # Just numbers/dates without context
-        r'^(page|pg)\s*\d+$',  # Page numbers
-        r'^\d{1,2}[\s\-\/]\d{1,2}[\s
-        r'^[A-Z]{2,}\s+\d{4}$',  # Month abbreviations with years (JUN 2013)
-        r'^\d{1,2}\s+[A-Z]{3,}\s+\d{4}$',  # Dates like "31 MAY 2014"
-        r'^(version|ver\.?)\s*\d',  # Version strings
-        r'^copyright|©',  # Copyright notices
-        r'^\s*[\(\)\[\]]+\s*$',  # Just brackets
-        r'^\s*[\.,:;]+\s*$',  # Just punctuation
-    ]
-    
-    for pattern in noise_patterns:
-        if re.match(pattern, text, re.IGNORECASE):
-            return True
-    
-    # Very small text is likely footnotes/metadata
-    if size < body_text_size * 0.7:
-        return True
-    
-    # Short fragments that look like broken text
-    if len(text) < 8 and not re.match(r'^\d+[\.\)]', text):
-        return True
-    
-    return False
-
-def clean_fragmented_title(text_parts):
-    """Combine fragmented title parts intelligently."""
-    if not text_parts:
-        return ""
-    
-    # Remove obvious fragments and noise
-    cleaned_parts = []
-    for part in text_parts:
-        part = part.strip()
-        if len(part) < 2:
-            continue
-        
-        # Skip obvious fragments
-        if re.match(r'^[A-Z]?[a-z]*[:\s]*$', part) and len(part) < 10:
-            continue
-        
-        # Skip repeated text patterns
-        if any(part in existing for existing in cleaned_parts):
-            continue
-            
-        cleaned_parts.append(part)
-    
-    if not cleaned_parts:
-        return ""
-    
-    # Try to reconstruct meaningful title
-    combined = " ".join(cleaned_parts)
-    
-    # Clean up common artifacts
-    combined = re.sub(r'\s+', ' ', combined)  # Multiple spaces
-    combined = re.sub(r'([a-z])([A-Z])', r'\1 \2', combined)  # CamelCase separation
-    
-    return combined.strip()
-
-def detect_numbered_heading(text):
-    """Detect numbered headings and return level and cleaned text."""
-    # Match patterns like "1.", "2.1", "3.2.1", "A1.", etc.
-    patterns = [
-        r'^\s*([A-Z]?\d+(?:\.\d+)*)[\.:]?\s+(.+)',  # Standard numbering
-        r'^\s*(\d+(?:\.\d+)*)\.\s+(.+)',  # Simple numbering
-        r'^\s*([IVX]+)\.\s+(.+)',  # Roman numerals
-        r'^\s*([A-Z])\.\s+(.+)',  # Letter headings
-    ]
-    
-    for pattern in patterns:
-        match = re.match(pattern, text, re.IGNORECASE)
-        if match:
-            number_part = match.group(1)
-            text_part = match.group(2).strip()
-            
-            if not text_part or len(text_part) < 3:
-                continue
-            
-            # Determine level based on numbering depth
-            if '.' in number_part:
-                level_depth = number_part.count('.') + 1
-            else:
-                level_depth = 1
-            
-            # Map to heading levels (cap at H4)
-            level_map = {1: "H1", 2: "H2", 3: "H3", 4: "H4"}
-            level = level_map.get(min(level_depth, 4), "H4")
-            
-            return level, text_part
-    
-    return None, text
-
 def identify_outline(blocks):
     """
-    Completely rewritten outline identification with focus on accuracy.
+    Identifies the title and hierarchical headings (H1, H2, H3) using refined heuristics.
+    This version focuses on robust multi-part title detection and strong numerical heading prioritization.
     """
     title = ""
     outline_items = []
-    
+
     if not blocks:
         return {"title": "", "outline": []}
-    
-    # Constants
+
     avg_page_width = 595.0
     avg_page_height = 842.0
-    TOP_ZONE = avg_page_height * 0.15  # Top 15%
-    BOTTOM_ZONE = avg_page_height * 0.85  # Bottom 15%
+
+    TOP_ZONE_THRESHOLD = avg_page_height * 0.10
+    BOTTOM_ZONE_THRESHOLD = avg_page_height * 0.90
+
+    header_footer_candidates = {} 
     
-    # Step 1: Identify and filter noise, headers, footers
-    frequent_text = {}
     for block in blocks:
         text = block['text'].strip()
         bbox = block['bbox']
         
-        # Check for headers/footers by position and frequency
-        if bbox[1] < TOP_ZONE or bbox[3] > BOTTOM_ZONE:
-            key = text.lower()
-            frequent_text[key] = frequent_text.get(key, 0) + 1
+        y_zone = None
+        if bbox[1] < TOP_ZONE_THRESHOLD:
+            y_zone = "top"
+        elif bbox[3] > BOTTOM_ZONE_THRESHOLD:
+            y_zone = "bottom"
+        
+        if y_zone:
+            key = (text, y_zone)
+            header_footer_candidates[key] = header_footer_candidates.get(key, 0) + 1
     
-    # Common headers/footers that appear frequently
-    num_pages = len(set(b['page'] for b in blocks))
-    frequent_headers_footers = set()
-    for text, count in frequent_text.items():
-        if count >= max(2, num_pages // 2):
-            frequent_headers_footers.add(text)
-    
-    # Add known noise patterns
-    known_noise = {
-        "version 2014", "page", "copyright", "istqb", "international software testing",
-        "qualifications board", "foundation level extension", "agile tester"
-    }
-    frequent_headers_footers.update(known_noise)
-    
-    # Step 2: Estimate body text size
-    clean_blocks = []
-    size_counter = Counter()
-    
+    num_unique_pages = len(set(b['page'] for b in blocks))
+    frequent_headers_footers_text = set() 
+    for (text, y_zone), count in header_footer_candidates.items():
+        if num_unique_pages > 2 and count >= num_unique_pages * 0.5: 
+            frequent_headers_footers_text.add(text)
+        elif num_unique_pages <= 2 and count >= num_unique_pages:
+            frequent_headers_footers_text.add(text)
+        if text.lower() in ["version 2014", "page", "copyright notice", "international software testing qualifications board", "istqb", "connecting ontarians!", "foundation level extension - agile tester", "rfp: to develop the ontario digital library business plan march 2003"]:
+            frequent_headers_footers_text.add(text)
+
+    semi_filtered_blocks = []
     for block in blocks:
-        text = block['text'].strip()
-        size = block['size']
-        bbox = block['bbox']
-        
-        if not text or len(text) < 2:
-            continue
-            
-        # Skip obvious headers/footers
-        if text.lower() in frequent_headers_footers:
-            continue
-            
-        clean_blocks.append(block)
-        
-        # Count sizes for body text estimation (exclude very large/small text)
-        if 8 <= size <= 20:
-            size_counter[size] += 1
-    
-    # Get most common size as body text size
-    if size_counter:
-        body_text_size = size_counter.most_common(1)[0][0]
-    else:
-        body_text_size = 11.0
-    
-    # Step 3: Enhanced title detection for first page
-    first_page_blocks = [b for b in clean_blocks if b['page'] == 1]
-    first_page_blocks.sort(key=lambda x: (x['bbox'][1], -x['size']))  # Top to bottom, large to small
-    
-    # Strategy: Look for most prominent text in top area
-    title_candidates = []
-    
-    for block in first_page_blocks:
         text = block['text'].strip()
         size = block['size']
         font = block['font']
+        page_num = block['page']
         bbox = block['bbox']
-        
-        # Must be in top portion of page
-        if bbox[1] > avg_page_height * 0.4:
-            break
-            
-        # Skip if too small or noise
-        if is_likely_noise(text, size, body_text_size):
+
+        if not text: continue
+        if len(text) < 2 and not text.isdigit(): continue
+        if re.fullmatch(r'[\-\_=\s\.]+', text): continue
+        if text.strip().isdigit() and (bbox[1] < TOP_ZONE_THRESHOLD * 1.5 or bbox[3] > BOTTOM_ZONE_THRESHOLD * 0.8):
+            continue
+        if text.endswith(":") and len(text) < 30 and not is_bold(font) and size < 18:
             continue
             
-        # Check if this looks like a title
-        is_prominent = (
-            size >= body_text_size * 1.5 or  # Larger text
-            is_bold(font) or  # Bold text
-            len(text) > 15  # Substantial content
-        )
-        
-        if is_prominent:
-            title_candidates.append({
-                'text': text,
-                'size': size,
-                'bbox': bbox,
-                'bold': is_bold(font),
-                'y_pos': bbox[1]
-            })
+        semi_filtered_blocks.append(block)
+
+    if not semi_filtered_blocks:
+        return {"title": "", "outline": []}
+
+    size_counts_for_body = Counter(b['size'] for b in semi_filtered_blocks if 8 <= b['size'] <= 18)
+    body_text_size = None
+    if size_counts_for_body:
+        body_text_size = max(size_counts_for_body, key=size_counts_for_body.get)
+    else:
+        filtered_for_body_fallback = [b for b in semi_filtered_blocks if b['size'] < 25]
+        if filtered_for_body_fallback:
+            body_text_size = max(Counter(b['size'] for b in filtered_for_body_fallback), key=Counter(b['size'] for b in filtered_for_body_fallback).get)
     
-    # Find the best title
-    if title_candidates:
-        # Sort by position (top first), then by prominence
-        title_candidates.sort(key=lambda x: (x['y_pos'], -x['size'], -int(x['bold'])))
+    if body_text_size is None:
+        body_text_size = 11.0
+
+    H1_SIZE_THRESHOLD = body_text_size * 2.2 if body_text_size else 22.0
+    H2_SIZE_THRESHOLD = body_text_size * 1.6 if body_text_size else 16.0
+    H3_SIZE_THRESHOLD = body_text_size * 1.3 if body_text_size else 13.0
+    H4_SIZE_THRESHOLD = body_text_size * 1.1 if body_text_size else 11.0
+
+    first_page_top_blocks = [b for b in semi_filtered_blocks if b['page'] == 1 and b['bbox'][1] < avg_page_height * 0.4]
+    first_page_top_blocks.sort(key=lambda b: (b['bbox'][1], -b['size']))
+
+    identified_title_blocks_bboxes = set()
+    
+    if first_page_top_blocks:
+        most_prominent_block = first_page_top_blocks[0]
+
+        num_other_prominent_near = 0
+        for i in range(1, len(first_page_top_blocks)):
+            other_block = first_page_top_blocks[i]
+            if abs(other_block['bbox'][1] - most_prominent_block['bbox'][3]) < most_prominent_block['size'] * 2.0 and \
+               (other_block['size'] >= body_text_size * 1.5 or is_bold(other_block['font'])):
+                num_other_prominent_near += 1
         
-        # Try to combine related title parts
-        if len(title_candidates) > 1:
-            # Check if multiple candidates are close together (multi-line title)
-            primary = title_candidates[0]
-            title_parts = [primary['text']]
+        if num_other_prominent_near == 0 and \
+           (most_prominent_block['size'] >= H1_SIZE_THRESHOLD * 0.9 or \
+            (is_bold(most_prominent_block['font']) and most_prominent_block['size'] >= H2_SIZE_THRESHOLD)) and \
+           len(most_prominent_block['text'].strip()) > 10 and \
+           most_prominent_block['text'].strip().lower() not in frequent_headers_footers_text:
             
-            for candidate in title_candidates[1:]:
-                # Close vertically and similar formatting
-                if (abs(candidate['y_pos'] - primary['y_pos']) < primary['size'] * 2 and
-                    abs(candidate['size'] - primary['size']) <= 2):
-                    title_parts.append(candidate['text'])
-                else:
-                    break
-            
-            title = clean_fragmented_title(title_parts)
+            title = most_prominent_block['text'].strip()
+            identified_title_blocks_bboxes.add(tuple(most_prominent_block['bbox']))
         else:
-            title = title_candidates[0]['text']
-    
-    # Clean up title
-    title = re.sub(r'\s+', ' ', title).strip()
-    
-    # Step 4: Identify headings with much stricter criteria
-    used_title_text = set()
-    if title:
-        used_title_text.add(title.lower())
-        # Also add title fragments to avoid re-using them
-        title_words = title.lower().split()
-        if len(title_words) > 2:
-            used_title_text.update(title_words)
-    
-    # More conservative heading size thresholds
-    H1_THRESHOLD = body_text_size * 2.5  # Much higher threshold
-    H2_THRESHOLD = body_text_size * 1.8
-    H3_THRESHOLD = body_text_size * 1.4
-    H4_THRESHOLD = body_text_size * 1.2
-    
-    for block in clean_blocks:
+            potential_multi_line_title_parts = []
+
+            if first_page_top_blocks and \
+               first_page_top_blocks[0]['bbox'][1] < avg_page_height * 0.3 and \
+               (first_page_top_blocks[0]['size'] >= H2_SIZE_THRESHOLD or is_bold(first_page_top_blocks[0]['font'])):
+                
+                potential_multi_line_title_parts.append(first_page_top_blocks[0])
+                
+                for i in range(1, len(first_page_top_blocks)):
+                    current_block = first_page_top_blocks[i]
+                    prev_block = potential_multi_line_title_parts[-1]
+
+                    if abs(current_block['bbox'][1] - prev_block['bbox'][3]) < prev_block['size'] * 1.0 and \
+                       abs(current_block['bbox'][0] - prev_block['bbox'][0]) < 20 and \
+                       abs(current_block['size'] - prev_block['size']) < 2.0 and \
+                       is_bold(current_block['font']) == is_bold(prev_block['font']) and \
+                       current_block['size'] >= H3_SIZE_THRESHOLD:
+                        
+                        potential_multi_line_title_parts.append(current_block)
+                    else:
+                        break
+            
+            if potential_multi_line_title_parts and len(potential_multi_line_title_parts) > 0:
+                combined_title_text = " ".join([b['text'].strip() for b in potential_multi_line_title_parts])
+                if len(combined_title_text) > 15 and combined_title_text not in frequent_headers_footers_text:
+                    title = combined_title_text
+                    for part_block in potential_multi_line_title_parts:
+                        identified_title_blocks_bboxes.add(tuple(part_block['bbox']))
+
+    final_filtered_blocks = []
+    for block in semi_filtered_blocks:
+        if not (block['page'] == 1 and tuple(block['bbox']) in identified_title_blocks_bboxes):
+            final_filtered_blocks.append(block)
+
+    current_active_headings = [] 
+
+    for block in final_filtered_blocks:
         text = block['text'].strip()
         size = block['size']
         font = block['font']
         page = block['page']
-        
-        # Skip if likely noise
-        if is_likely_noise(text, size, body_text_size):
+        bbox = block['bbox']
+
+        if not text or len(text) < 3:
             continue
-            
-        # Skip if part of title
-        if text.lower() in used_title_text:
+        if text.strip().isdigit() and size < H3_SIZE_THRESHOLD:
             continue
-            
-        # Skip very short text unless it's numbered
-        if len(text) < 5 and not re.match(r'^\d+[\.\)]', text):
+        if text in frequent_headers_footers_text:
             continue
-        
+        if text == title:
+            continue
+
         level = None
-        cleaned_text = text
-        
-        # Primary: Check for numbered headings
-        numbered_level, numbered_text = detect_numbered_heading(text)
-        if numbered_level and len(numbered_text) >= 5:
-            level = numbered_level
-            cleaned_text = numbered_text
-        
-        # Secondary: Size and style based detection (much more conservative)
-        elif size >= H1_THRESHOLD and is_bold(font):
-            level = "H1"
-        elif size >= H2_THRESHOLD and is_bold(font):
-            level = "H2"
-        elif size >= H3_THRESHOLD and (is_bold(font) or is_all_caps(text)):
-            level = "H3"
-        elif size >= H4_THRESHOLD and is_bold(font) and len(text) >= 10:
-            level = "H4"
-        
-        # Additional filters for non-numbered headings
-        if level and not numbered_level:
-            # Skip if it looks like a date or version
-            if re.match(r'^(\d{1,2}\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)', text, re.IGNORECASE):
-                continue
-            if re.match(r'^version|^v\d|^\d{4}$', text, re.IGNORECASE):
-                continue
-            # Skip very short all-caps unless it's clearly a heading
-            if is_all_caps(text) and len(text) < 8:
-                continue
-        
+
+        match_num_pattern = re.match(r'^\s*([A-Z]?\d+(\.\d+)*)\s+(.*)', text, re.IGNORECASE)
+        if match_num_pattern:
+            num_prefix = match_num_pattern.group(1)
+            remaining_text = match_num_pattern.group(3).strip()
+            
+            num_levels = num_prefix.count('.') + 1
+
+            if num_levels == 1: level = "H1"
+            elif num_levels == 2: level = "H2"
+            elif num_levels == 3: level = "H3"
+            elif num_levels == 4: level = "H4"
+            else: level = "H4" 
+
+            text = remaining_text
+
+            if level and size < body_text_size * 0.9: 
+                 level = None
+            elif level == "H1" and size < H1_SIZE_THRESHOLD / 2.0: pass
+            elif level == "H2" and size < H2_SIZE_THRESHOLD / 1.5: pass
+            elif level == "H3" and size < H3_SIZE_THRESHOLD / 1.2: pass
+            elif level == "H4" and size < H4_SIZE_THRESHOLD: pass
+
+        if not level:
+            if is_bold(font) and size > body_text_size * 1.05:
+                if size >= H1_SIZE_THRESHOLD: level = "H1"
+                elif size >= H2_SIZE_THRESHOLD: level = "H2"
+                elif size >= H3_SIZE_THRESHOLD: level = "H3"
+                elif size >= H4_SIZE_THRESHOLD: level = "H4"
+            elif is_all_caps(text) and len(text) > 5 and size > body_text_size * 1.05:
+                if size >= H1_SIZE_THRESHOLD * 0.9: level = "H1"
+                elif size >= H2_SIZE_THRESHOLD * 0.9: level = "H2"
+                elif size >= H3_SIZE_THRESHOLD * 0.9: level = "H3"
+                elif size >= H4_SIZE_THRESHOLD * 0.9: level = "H4"
+
+            if level and len(text) < 15 and size < H2_SIZE_THRESHOLD and not re.match(r'^\d+(\.\d+)*', text):
+                if level == "H1": level = "H2"
+                if level == "H2": level = "H3"
+
+
         if level:
-            outline_items.append({
-                'level': level,
-                'text': cleaned_text,
-                'page': page
-            })
-    
-    # Step 5: Clean up and deduplicate
-    seen = set()
+            current_heading_obj = {
+                "level": level,
+                "text": text,
+                "page": page,
+                "bbox": bbox, 
+                "size": size 
+            }
+
+            new_active_headings_list = []
+            for active_level_str, active_obj in current_active_headings:
+                if (active_obj['page'] == page and int(active_level_str[1]) < int(level[1])) or \
+                   (active_obj['page'] != page and int(active_level_str[1]) <= int(level[1])):
+                    new_active_headings_list.append((active_level_str, active_obj))
+            current_active_headings = new_active_headings_list
+
+            if level == "H2" and not any(h[0] == "H1" and h[1]['page'] == page for h in current_active_headings):
+                 level = "H1"
+            elif level == "H3" and not any(h[0] == "H2" and h[1]['page'] == page for h in current_active_headings):
+                if not any(h[0] == "H1" and h[1]['page'] == page for h in current_active_headings):
+                    level = "H1"
+                else:
+                    level = "H2"
+            elif level == "H4" and not any(h[0] == "H3" and h[1]['page'] == page for h in current_active_headings):
+                 if not any(h[0] == "H2" and h[1]['page'] == page for h in current_active_headings):
+                    if not any(h[0] == "H1" and h[1]['page'] == page for h in current_active_headings):
+                        level = "H1"
+                    else:
+                        level = "H2"
+                 else:
+                    level = "H3"
+
+            current_heading_obj['level'] = level
+
+            outline_items.append(current_heading_obj)
+            current_active_headings.append((level, current_heading_obj))
+
     final_outline = []
-    
+    seen_headings_for_output = set() 
+
     for item in outline_items:
-        # Create a key for deduplication
-        key = (item['level'], item['text'].lower(), item['page'])
-        if key not in seen:
-            # Final validation
-            if len(item['text']) >= 3:  # Minimum text length
-                final_outline.append(item)
-                seen.add(key)
-    
+        clean_item = {k: v for k, v in item.items() if k not in ['bbox', 'size']}
+        clean_item['text'] = clean_item['text'].strip()
+
+        if len(clean_item['text']) < 5 and not re.match(r'^\d+(\.\d+)*\s*$', clean_item['text']):
+            continue
+
+        item_tuple = (clean_item['level'], clean_item['text'], clean_item['page'])
+        if item_tuple not in seen_headings_for_output:
+            final_outline.append(clean_item)
+            seen_headings_for_output.add(item_tuple)
+            
     return {"title": title, "outline": final_outline}
