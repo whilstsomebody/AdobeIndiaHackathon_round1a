@@ -1,71 +1,74 @@
-import fitz
+# utils/pdf_parser.py
+
+import fitz # PyMuPDF
+import re
 
 def extract_text_blocks_with_details(pdf_path):
     """
-    Extracts text blocks along with font size, name, and page number from a PDF.
-    Attempts to merge logically contiguous text spans and lines.
+    Extracts text blocks (lines) along with font size, name, and page number from a PDF.
+    Focuses on reliable line extraction and initial span merging.
     """
     doc = fitz.open(pdf_path)
-    all_extracted_blocks = []
+    all_extracted_lines = [] # Renamed to emphasize we're getting lines/span groups
 
     for page_num, page in enumerate(doc):
-        page_blocks = page.get_text("dict")["blocks"]
+        page_dict = page.get_text("dict")
+        
+        # Sort raw blocks by Y-coordinate
+        sorted_raw_blocks = sorted(page_dict["blocks"], key=lambda b: b["bbox"][1])
 
-        processed_page_blocks = []
+        for b_raw in sorted_raw_blocks:
+            if b_raw['type'] == 0: # text block
+                
+                # Sort raw lines within a block by Y-coordinate
+                for l_raw in sorted(b_raw["lines"], key=lambda l: l["bbox"][1]):
+                    merged_spans = []
+                    # Sort raw spans within a line by X-coordinate
+                    for s_raw in sorted(l_raw["spans"], key=lambda s: s["bbox"][0]):
+                        span_text = s_raw["text"]
+                        if not span_text.strip(): continue
 
-        for b in page_blocks:
-            if b['type'] == 0:
-                current_line_text = ""
-                current_line_font = ""
-                current_line_size = 0.0
-                current_line_bbox = [float('inf'), float('inf'), float('-inf'), float('-inf')]
-
-                for line in b["lines"]:
-                    merged_line_text = ""
-                    line_spans = []
-                    for span in line["spans"]:
-                        span_text = span["text"].strip()
-                        if not span_text:
-                            continue
-
-                        if line_spans and \
-                           abs(line_spans[-1]['bbox'][2] - span['bbox'][0]) < 5 and \
-                           line_spans[-1]['font'] == span['font'] and \
-                           abs(line_spans[-1]['size'] - span['size']) < 0.1:
+                        # Aggressive horizontal merging of spans that are very close horizontally and similar style
+                        if merged_spans and \
+                           s_raw['bbox'][0] - merged_spans[-1]['bbox'][2] < 3 and \
+                           abs(s_raw['size'] - merged_spans[-1]['size']) < 0.1 and \
+                           s_raw['font'] == merged_spans[-1]['font']:
                             
-                            line_spans[-1]['text'] += " " + span_text
-                            line_spans[-1]['bbox'][2] = span['bbox'][2]
-                            line_spans[-1]['bbox'][1] = min(line_spans[-1]['bbox'][1], span['bbox'][1])
-                            line_spans[-1]['bbox'][3] = max(line_spans[-1]['bbox'][3], span['bbox'][3])
+                            merged_spans[-1]['text'] += span_text
+                            merged_spans[-1]['bbox'][2] = s_raw['bbox'][2]
+                            merged_spans[-1]['bbox'][1] = min(merged_spans[-1]['bbox'][1], s_raw['bbox'][1])
+                            merged_spans[-1]['bbox'][3] = max(merged_spans[-1]['bbox'][3], s_raw['bbox'][3])
                         else:
-                            line_spans.append({
+                            merged_spans.append({
                                 "text": span_text,
-                                "font": span["font"],
-                                "size": span["size"],
-                                "bbox": list(span["bbox"]),
+                                "font": s_raw["font"],
+                                "size": s_raw["size"],
+                                "bbox": list(s_raw["bbox"]), # Store as mutable list
                             })
+                    
+                    if merged_spans:
+                        # Reconstruct text for the entire logical line
+                        line_text = "".join([s['text'] for s in merged_spans]).strip()
+                        # Apply initial normalization to remove obvious PDF artifacts like repeated characters
+                        line_text = re.sub(r'(.)\1{3,}', r'\1', line_text)
+                        line_text = re.sub(r'\s+', ' ', line_text).strip()
+                        
+                        if not line_text: continue
 
-                    if line_spans:
-                        merged_line_text = " ".join([s['text'] for s in line_spans])
-                        dominant_span = max(line_spans, key=lambda s: s['size'] * len(s['text'])) if line_spans else line_spans[0]
-                        current_line_font = dominant_span['font']
-                        current_line_size = dominant_span['size']
+                        dominant_span = max(merged_spans, key=lambda s: s['size'] * len(s['text']))
+                        
+                        line_x0 = min(s['bbox'][0] for s in merged_spans)
+                        line_y0 = min(s['bbox'][1] for s in merged_spans)
+                        line_x1 = max(s['bbox'][2] for s in merged_spans)
+                        line_y1 = max(s['bbox'][3] for s in merged_spans)
 
-                        x0 = min(s['bbox'][0] for s in line_spans)
-                        y0 = min(s['bbox'][1] for s in line_spans)
-                        x1 = max(s['bbox'][2] for s in line_spans)
-                        y1 = max(s['bbox'][3] for s in line_spans)
-                        current_line_bbox = [x0, y0, x1, y1]
-
-                        processed_page_blocks.append({
-                            "text": merged_line_text,
-                            "font": current_line_font,
-                            "size": current_line_size,
-                            "bbox": current_line_bbox,
+                        all_extracted_lines.append({
+                            "text": line_text,
+                            "font": dominant_span['font'],
+                            "size": dominant_span['size'],
+                            "bbox": [line_x0, line_y0, line_x1, line_y1],
                             "page": page_num + 1
                         })
-        
-        all_extracted_blocks.extend(processed_page_blocks)
     
     doc.close()
-    return all_extracted_blocks
+    return all_extracted_lines
