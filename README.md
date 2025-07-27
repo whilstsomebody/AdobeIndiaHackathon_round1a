@@ -36,6 +36,27 @@ My solution employs a heuristic-based approach combined with a robust PDF parsin
 
 No external machine learning models (like large language models for NLP) are directly used for classification in Round 1A, ensuring compliance with the `Model size ≤ 200MB` constraint. The solution is entirely CPU-based and operates offline.
 
+```mermaid
+graph TD
+    A[Start] --> B(Input PDF File);
+    B --> C{utils/pdf_parser.py: Extract Text Blocks with Details};
+    C --> D{Perform Span Merging & Line Normalization};
+    D --> E["List of Cleaned Text Blocks (Lines) with Properties"];
+    E --> F{utils/outline_extractor.py: Identify Outline};
+    F --> G{Estimate Body Text Size};
+    G --> H{Identify Frequent Headers/Footers};
+    H --> I{Prioritized Title Detection on Page 1};
+    I --> J{Remove Title Blocks from Consideration};
+    J --> K["Identify Headings (H1, H2, H3, H4) from remaining blocks"];
+    K --> L{Prioritize Numerical Prefixes};
+    L --> M{Apply Font/Style Heuristics};
+    M --> N{Apply Hierarchical Promotion/Demotion};
+    N --> O["Generate Final Outline Items (level, text, page)"];
+    O --> P{Remove Duplicates & Apply Final Filters};
+    P --> Q[Output JSON File: Title + Outline Array];
+    Q --> R[End];
+```
+
 ### How to Build and Run The Solution
 
 The solution is designed to run within a Docker container, ensuring a consistent and isolated execution environment as expected by the hackathon organizers.
